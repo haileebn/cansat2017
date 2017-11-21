@@ -1,6 +1,7 @@
 #include <DHT.h>
 #include <SFE_BMP180.h>
 #include <Wire.h>
+#include <math.h>
 
 SFE_BMP180 pressure;
 
@@ -18,7 +19,7 @@ int PM10Value = 0;
 
 
 // CO MQ7
-#define buzzer 10
+//#define buzzer 10
 #define sensor A0
 int coValue;
 
@@ -41,7 +42,7 @@ String readData(){
   String result = "";
   result += "temp: " + String(getTemperature()) + "\n";
   result += "hud: " + String(getHumidity()) + "\n";
-  result += "Pressure: " + String(getPressure()) + "\n";
+  result += "Pressure: " + String(getPressure(getTemperaturePressure())) + "\n";
   result += "Pressure-DHT22: " + String(getPressure(getTemperature())) + "\n";
   
   if(Serial.find(0x42)){    //start to read when detect 0x42
@@ -55,9 +56,9 @@ String readData(){
       }           
     }
   }
-//  result += "pm1 :"+String(PM01Value) + "\n";
-//  result += "pm25:"+String(PM25Value)+"\n";
-//  result += "pm10:"+String(PM10Value)+"\n";
+  result += "pm1 :"+String(PM01Value) + "\n";
+  result += "pm25:"+String(PM25Value)+"\n";
+  result += "pm10:"+String(PM10Value)+"\n";
   coValue = (analogRead(sensor)*5*200)/1024;
   result += "CO:"+String(coValue)+"\n";
 //  if(coValue>170) digitalWrite(buzzer,1);
@@ -65,40 +66,48 @@ String readData(){
 }
 
 
-void initPressure(){
+// return 1: success
+// return 0: fail
+int initPressure(){
 //  String result = "";
   
-  if (pressure.begin())
+  if (pressure.begin()){
     Serial.println("BMP180 init success");
+    return 1;
+  }
   else
   {
     Serial.println("BMP180 init fail (disconnected?)");
+    return 0;
   } 
 //  return result;
 }
 
+// return 0 fail
 double getTemperature(){
   double t = dht.readTemperature();
   String result = "";
   // Check if any reads failed and exit early (to try again).
   if (isnan(t)) {
     Serial.println("Failed to read from DHT sensor!");
-    return;
+    return 0;
   }
   return t;
 }
 
+// return 0 fail
 double getHumidity(){
   
   double h = dht.readHumidity();
   // Check if any reads failed and exit early (to try again).
   if (isnan(h)) {
     Serial.println("Failed to read from DHT sensor!");
-    return;
+    return 0;
   }
   return h;
 }
 
+// return 0 fail
 double getPressure(double T){
   char status;
   double P;
@@ -107,7 +116,6 @@ double getPressure(double T){
   {
     // Wait for the measurement to complete:
     delay(status);
-
     // Retrieve the completed pressure measurement:
     // Note that the measurement is stored in the variable P.
     // Use '&P' to provide the address of P.
@@ -119,17 +127,18 @@ double getPressure(double T){
     if (status != 0)
     {
       return P;
-      
     }
+    else return 0;
   }
+  else return 0;
 }
 
-double getPressure()
+// return 0 fail
+double getTemperaturePressure()
 {
   char status;
-  double T,P,p0,a;
-  const double R = 287.05; // J/Kg°K
-  const double g = 9.80665; //m/s 2.
+  double T; //,P,p0,a;
+
 
   // You must first get a temperature measurement to perform a pressure reading.
   
@@ -150,42 +159,47 @@ double getPressure()
     // Function returns 1 if successful, 0 if failure.
 
     status = pressure.getTemperature(T);
-    Serial.print("Temp of pressure: ");
-    Serial.println(T);
+//    Serial.print("Temp of pressure: ");
+//    Serial.println(T);
     if (status != 0)
     {
-      // Start a pressure measurement:
-      // The parameter is the oversampling setting, from 0 to 3 (highest res, longest wait).
-      // If request is successful, the number of ms to wait is returned.
-      // If request is unsuccessful, 0 is returned.
-
-      status = pressure.startPressure(3);
-      if (status != 0)
-      {
-        // Wait for the measurement to complete:
-        delay(status);
-
-        // Retrieve the completed pressure measurement:
-        // Note that the measurement is stored in the variable P.
-        // Use '&P' to provide the address of P.
-        // Note also that the function requires the previous temperature measurement (T).
-        // (If temperature is stable, you can do one temperature measurement for a number of pressure measurements.)
-        // Function returns 1 if successful, 0 if failure.
-
-        status = pressure.getPressure(P,T);
-        if (status != 0)
-        {
-          return P;
-          
-        }
-        else Serial.println("error retrieving pressure measurement\n");
-      }
-      else Serial.println("error starting pressure measurement\n");
+      return T;
     }
-    else Serial.println("error retrieving temperature measurement\n");
+    else{
+       Serial.println("error retrieving temperature measurement\n");
+       return 0;
+    }
   }
-  else Serial.println("error starting temperature measurement\n");
+  else {
+    Serial.println("error starting temperature measurement\n");
+    return 0;
+  }
 }
+
+/**
+* t,p la nhiet do, ap suat o tren cao
+* t0, p0 la nhiet do, ap suat ban dau duoi mat dat
+*/
+double getAltitudePressure(double t, double t0){
+  const double R = 287.05; // J/Kg°K
+  const double g = 9.80665; //m/s 2.
+  
+  if(t == 0 || t0 == 0){
+    return 0;
+  }
+  else {
+    double k = 273.15;
+    double T = t + k;
+    double T0 = t0 + k;
+    double p = getPressure(t);
+    double p0 = getPressure(t0);
+    if(p == 0) return 0;
+    else {
+      return ((R/g)*((T+ T0)/2)*log10 (p0/p));
+    }
+  }
+}
+
 
 //Check pms5003 module
 char checkValue(unsigned char *thebuf, char leng)
