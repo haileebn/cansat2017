@@ -1,9 +1,23 @@
 #include <DHT.h>
 #include <SFE_BMP180.h>
 #include <Wire.h>
+//#include <ArduinoJson.h>
+#include <SoftwareSerial.h>
+#include <TimeLib.h>
+#include <TinyGPS.h>
 #include <math.h>
+#include "RF24.h"
+#include <SPI.h>
+
+// nRF24
+const uint64_t pipe = 0xE8E8F0F0E1LL; // адрес канала передачи
+RF24 radio(49,53);
 
 SFE_BMP180 pressure;
+
+//GPS
+#define SerialGPS Serial3
+TinyGPS gps;
 
 // DHT-22
 #define DHTPIN 2 
@@ -16,6 +30,7 @@ unsigned char buf[LENG];
 int PM01Value = 0;          
 int PM25Value = 0;
 int PM10Value = 0;
+SoftwareSerial PMS5003_Serial(11, 10); // RX, TX
 
 
 // CO MQ7
@@ -26,46 +41,142 @@ int coValue;
 void setup() {
   // put your setup code here, to run once:
   Serial.begin(9600);
+  PMS5003_Serial.begin(9600);
+  SerialGPS.begin(9600);
+  setTimefromGPS();
 //  Serial.println("DHTxx test!");
   initPressure();
   dht.begin();
+  
+  // nRF24 
+  radio.begin();                      // Включение модуля
+  radio.setAutoAck(1);                // Установка режима подтверждения приема;
+  radio.setRetries(1,1);              // Установка интервала и количества попыток
+  radio.setDataRate(RF24_250KBPS);    // Устанавливаем скорость
+  radio.setPALevel(RF24_PA_MAX);      // Установка максимальной мощности;
+  radio.setChannel(10);               // Устанавливаем канал
+//  radio.setCRCLength(RF24_CRC_8); 
+// max = 32
+radio.setPayloadSize(16);
+  radio.openWritingPipe(pipe);
 }
 
 void loop() {
   // put your main code here, to run repeatedly:
-  delay(5000);
-  String result = readData();
-  Serial.println(result);
+  delay(1000);
+  char msg[210] = "";
+  strncpy(msg, readData().c_str(), sizeof(msg));
+//  radio.setPayloadSize(210);
+  radio.write(&msg, sizeof(msg));
+  Serial.println(msg);
 }
 
 String readData(){
-  String result = "";
-  result += "temp: " + String(getTemperature()) + "\n";
-  result += "hud: " + String(getHumidity()) + "\n";
-  result += "Pressure: " + String(getPressure(getTemperaturePressure())) + "\n";
-  result += "Pressure-DHT22: " + String(getPressure(getTemperature())) + "\n";
+  String unix_time_now = String(now());
+  String temp = String(getTemperature());
+  String hud = String(getHumidity());
+  String pressure = String(getPressure(getTemperaturePressure()));
+  String pressure_DHT22 = String(getPressure(getTemperature()));
   
-  if(Serial.find(0x42)){    //start to read when detect 0x42
-    Serial.readBytes(buf,LENG);
+  int* pm = readPM();
+  String pm1 = String(pm[0]);
+  String pm25 = String(pm[1]);
+  String pm10 = String(pm[2]);
+  coValue = (analogRead(sensor)/1024)*5*200;
+  String CO = String(coValue);
+
+  String json_string = String("{\"time\":\"" + unix_time_now + "\",") 
+                + String("\"values\":{")
+                + String(getLatLng())
+                + String("\"temp\":\"" + temp + "\",")
+                + String("\"hud\":\"" + hud + "\",")
+                + String("\"pressure\":\"" + pressure + "\",")
+                + String("\"pressure_DHT22\":\"" + pressure_DHT22 + "\",")
+                + String("\"pm1\":\"" + pm1 + "\",")
+                + String("\"pm25\":\"" + pm25 + "\",")
+                + String("\"pm10\":\"" + pm10 + "\",")
+                + String("\"CO\":\"" + CO + "\"")
+                + String("}}");
  
-    if(buf[0] == 0x4d){
-      if(checkValue(buf,LENG)){
-        PM01Value = transmitPM01(buf); //count PM1.0 value of the air detector module
-        PM25Value = transmitPM25(buf);//count PM2.5 value of the air detector module
-        PM10Value = transmitPM10(buf); //count PM10 value of the air detector module 
-      }           
-    }
-  }
-  result += "pm1 :"+String(PM01Value) + "\n";
-  result += "pm25:"+String(PM25Value)+"\n";
-  result += "pm10:"+String(PM10Value)+"\n";
-  coValue = (analogRead(sensor)*5*200)/1024;
-  result += "CO:"+String(coValue)+"\n";
-//  if(coValue>170) digitalWrite(buzzer,1);
-  return result;
+//  DynamicJsonBuffer jsonBuffer;
+//  JsonObject& root = jsonBuffer.parseObject(json_string);
+//  root.prettyPrintTo(Serial);
+  return json_string;
 }
 
+void setTimefromGPS(){
 
+  // thieu vong for o ngoai nen ko chay vao while duoc.  
+  for (unsigned long start = millis(); millis() - start < 1000;)
+  {
+    while (SerialGPS.available()) {
+    if (gps.encode(SerialGPS.read())) { // process gps messages
+      // when TinyGPS reports new data...
+      unsigned long age;
+      int Year;
+      byte Month, Day, Hour, Minute, Second;
+      
+      // Truong ko them dong nay thi sao cac bien Month, day, hour... o tren thay doi duoc???
+      gps.crack_datetime(&Year, &Month, &Day, &Hour, &Minute, &Second, NULL, &age);
+      
+      if (age < 500) {
+        // set the Time to the latest GPS reading
+        setTime(Hour, Minute, Second, Day, Month, Year);
+//        adjustTime(offset * SECS_PER_HOUR);
+      }
+      
+    }
+  }
+  }
+}
+String getLatLng(){
+  bool newData = false;
+  unsigned long chars;
+  unsigned short sentences, failed;
+  float flat = 0, flon = 0;
+
+  // For one second we parse GPS data and report some key values
+  for (unsigned long start = millis(); millis() - start < 1000;)
+  {
+    while (SerialGPS.available())
+    {
+      char c = SerialGPS.read();
+      // Serial.write(c); // uncomment this line if you want to see the GPS data flowing
+      if (gps.encode(c)) // Did a new valid sentence come in?
+        newData = true;
+    }
+  }
+
+  if (newData)
+  {
+    unsigned long age;
+    gps.f_get_position(&flat, &flon, &age);
+    
+                      
+//    Serial.print(location);
+//    Serial.print(flat == TinyGPS::GPS_INVALID_F_ANGLE ? 0.0 : flat, 6);
+//    Serial.print(" LON=");
+//    Serial.print(flon == TinyGPS::GPS_INVALID_F_ANGLE ? 0.0 : flon, 6);
+//    Serial.print(" SAT=");
+//    Serial.print(gps.satellites() == TinyGPS::GPS_INVALID_SATELLITES ? 0 : gps.satellites());
+//    Serial.print(" PREC=");
+//    Serial.print(gps.hdop() == TinyGPS::GPS_INVALID_HDOP ? 0 : gps.hdop());
+    
+  }
+  
+  gps.stats(&chars, &sentences, &failed);
+//  Serial.print(" CHARS=");
+//  Serial.print(chars);
+//  Serial.print(" SENTENCES=");
+//  Serial.print(sentences);
+//  Serial.print(" CSUM ERR=");
+//  Serial.println(failed);
+  if (chars == 0)
+    Serial.println("** No characters received from GPS: check wiring **");
+  String location = String("\"LAT\":\"" + String(flat,6) + "\",")
+                      + String("\"LON\":\"" + String(flon,6) + "\",");
+  return location;
+}
 // return 1: success
 // return 0: fail
 int initPressure(){
@@ -200,6 +311,24 @@ double getAltitudePressure(double t, double t0){
   }
 }
 
+int* readPM(){
+   if(PMS5003_Serial.find(0x42)){    //start to read when detect 0x42
+    PMS5003_Serial.readBytes(buf,LENG);
+ 
+    if(buf[0] == 0x4d){
+      if(checkValue(buf,LENG)){
+        PM01Value = transmitPM01(buf); //count PM1.0 value of the air detector module
+        PM25Value = transmitPM25(buf);//count PM2.5 value of the air detector module
+        PM10Value = transmitPM10(buf); //count PM10 value of the air detector module 
+      }           
+    }
+  }
+  static int result[3];
+  result[0] = PM01Value;
+  result[1] = PM25Value;
+  result[2] = PM10Value;
+  return result;
+}
 
 //Check pms5003 module
 char checkValue(unsigned char *thebuf, char leng)
